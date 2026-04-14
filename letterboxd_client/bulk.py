@@ -26,7 +26,12 @@ def flatten_pages(pages: Iterable[Page[Any]]) -> list[Any]:
 
 
 def hydrate_many(ids: Iterable[str], getter: Callable[[str], Any]) -> list[Any]:
-    return [getter(item_id) for item_id in ids]
+    return list(iter_hydrate_many(ids, getter))
+
+
+def iter_hydrate_many(ids: Iterable[str], getter: Callable[[str], Any]) -> Iterator[Any]:
+    for item_id in ids:
+        yield getter(item_id)
 
 
 def dedupe_by_lid(records: Iterable[dict[str, Any] | Any]) -> list[dict[str, Any] | Any]:
@@ -78,4 +83,3 @@ def to_arrow(data: Iterable[Any]) -> Any:
     except ImportError as exc:
         raise ImportError("Install the 'dataframes' extra to use Arrow support") from exc
     return pa.Table.from_pylist(_tabularise(data))
-

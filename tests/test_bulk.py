@@ -1,6 +1,7 @@
 import unittest
+from collections.abc import Iterator
 
-from letterboxd_client.bulk import dedupe_by_lid, flatten_pages, hydrate_many, iterate_all
+from letterboxd_client.bulk import dedupe_by_lid, flatten_pages, hydrate_many, iter_hydrate_many, iterate_all
 from letterboxd_client.models import Page
 
 
@@ -24,6 +25,18 @@ class BulkTests(unittest.TestCase):
     def test_hydrate_many(self) -> None:
         self.assertEqual(hydrate_many(["a", "b"], lambda value: value.upper()), ["A", "B"])
 
+    def test_iter_hydrate_many_is_lazy(self) -> None:
+        seen: list[str] = []
+
+        def ids() -> Iterator[str]:
+            for item_id in ["a", "b"]:
+                seen.append(item_id)
+                yield item_id
+
+        hydrated = iter_hydrate_many(ids(), lambda value: value.upper())
+        self.assertEqual(next(hydrated), "A")
+        self.assertEqual(seen, ["a"])
+
     def test_dedupe_by_lid(self) -> None:
         rows = [{"id": "1", "title": "A"}, {"id": "1", "title": "A again"}, {"id": "2", "title": "B"}]
         self.assertEqual(dedupe_by_lid(rows), [rows[0], rows[2]])
@@ -31,4 +44,3 @@ class BulkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
