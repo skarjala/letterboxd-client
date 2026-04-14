@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Sandeep's feed</title>
+    <item>
+      <title>Cure was logged</title>
+      <link>https://letterboxd.com/film/cure/</link>
+      <description>Logged on a rainy evening.</description>
+    </item>
+    <item>
+      <title>Sandeep updated a list</title>
+      <link>https://letterboxd.com/list/top-japanese-thrillers/</link>
+      <description>List order changed.</description>
+    </item>
+  </channel>
+</rss>

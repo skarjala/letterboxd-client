@@ -34,6 +34,8 @@ from .parsers import (
 )
 from .transport import LetterboxdTransport
 
+_UNSET = object()
+
 
 def _ensure_page_url(path_or_url: str, base_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
@@ -41,6 +43,10 @@ def _ensure_page_url(path_or_url: str, base_url: str) -> str:
     if path_or_url.startswith("/"):
         return base_url.rstrip("/") + path_or_url
     return base_url.rstrip("/") + "/" + path_or_url.lstrip("/")
+
+
+def _drop_unset(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if value is not _UNSET}
 
 
 class _BaseNamespace:
@@ -61,6 +67,12 @@ class _BaseNamespace:
         if default_prefix and not value.startswith("http") and not value.startswith("/"):
             value = f"{default_prefix.rstrip('/')}/{value.strip('/')}/"
         return self.transport.resolve_url(value)
+
+    def _require_lid(self, value: str, *, default_prefix: str = "") -> str:
+        _, lid = self._resolve_reference(value, default_prefix=default_prefix)
+        if not lid:
+            raise UnsupportedFlow(f"Could not resolve a Letterboxd ID for {value!r}")
+        return lid
 
 
 class AuthNamespace(_BaseNamespace):
@@ -108,6 +120,9 @@ class FilmsNamespace(_BaseNamespace):
     def _film_url(self, film: str) -> tuple[str, str | None]:
         return self._resolve_reference(film, default_prefix="/film")
 
+    def _film_lid(self, film: str) -> str:
+        return self._require_lid(film, default_prefix="/film")
+
     def get(self, film: str) -> Film:
         resolved_url, lid = self._film_url(film)
         html = self.transport.get_html(resolved_url)
@@ -148,7 +163,7 @@ class FilmsNamespace(_BaseNamespace):
 
     def watchlist(self, film: str, enabled: bool = True) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._film_url(film)
+        lid = self._film_lid(film)
         return self.transport.request(
             "PATCH",
             f"/film/{lid}/me",
@@ -159,7 +174,7 @@ class FilmsNamespace(_BaseNamespace):
 
     def rate(self, film: str, rating: float) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._film_url(film)
+        lid = self._film_lid(film)
         return self.transport.request(
             "PATCH",
             f"/film/{lid}/me",
@@ -170,7 +185,7 @@ class FilmsNamespace(_BaseNamespace):
 
     def like(self, film: str, enabled: bool = True) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._film_url(film)
+        lid = self._film_lid(film)
         return self.transport.request(
             "PATCH",
             f"/film/{lid}/me",
@@ -181,7 +196,7 @@ class FilmsNamespace(_BaseNamespace):
 
     def mark_watched(self, film: str, watched: bool = True) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._film_url(film)
+        lid = self._film_lid(film)
         return self.transport.request(
             "PATCH",
             f"/film/{lid}/me",
@@ -197,6 +212,12 @@ class MembersNamespace(_BaseNamespace):
             return self.transport.resolve_url(member)
         cleaned = member.strip("/")
         return self.transport.resolve_url(f"/{cleaned}/")
+
+    def _member_lid(self, member: str) -> str:
+        if member.startswith("http"):
+            return self._require_lid(member)
+        cleaned = member.strip("/")
+        return self._require_lid(f"/{cleaned}/")
 
     def get(self, member: str) -> Member:
         resolved_url, lid = self._member_url(member)
@@ -261,7 +282,7 @@ class MembersNamespace(_BaseNamespace):
 
     def follow(self, member: str, enabled: bool = True) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._member_url(member)
+        lid = self._member_lid(member)
         return self.transport.request(
             "PATCH",
             f"/member/{lid}/me",
@@ -272,12 +293,12 @@ class MembersNamespace(_BaseNamespace):
 
     def block(self, member: str, enabled: bool = True) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._member_url(member)
+        lid = self._member_lid(member)
         return self.transport.request(
             "PATCH",
             f"/member/{lid}/me",
             api=True,
-            json={"blocked": enabled},
+            json={"blocking": enabled},
             expected_status=(200,),
         ).json()
 
@@ -285,6 +306,9 @@ class MembersNamespace(_BaseNamespace):
 class LogsNamespace(_BaseNamespace):
     def _log_url(self, log_entry: str) -> tuple[str, str | None]:
         return self._resolve_reference(log_entry, default_prefix="/log-entry")
+
+    def _log_lid(self, log_entry: str) -> str:
+        return self._require_lid(log_entry, default_prefix="/log-entry")
 
     def list(
         self,
@@ -324,34 +348,117 @@ class LogsNamespace(_BaseNamespace):
     def stats(self, log_entry: str) -> dict[str, Any]:
         return self.get(log_entry).stats
 
-    def create(self, **payload: Any) -> dict[str, Any]:
+    def create(
+        self,
+        *,
+        film: str,
+        watched_on: str | None = None,
+        rating: float | None = None,
+        review_text: str | None = None,
+        review_spoilers: bool | None = None,
+        tags: list[str] | None = None,
+        rewatch: bool | None = None,
+        liked: bool | None = None,
+        comment_policy: str | None = None,
+        privacy_policy: str | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
         self._require_api()
+        payload: dict[str, Any] = {"filmId": self._client.films._film_lid(film)}
+        if watched_on is not None:
+            payload["diaryDetails"] = {"diaryDate": watched_on}
+            if rewatch is not None:
+                payload["diaryDetails"]["rewatch"] = rewatch
+        elif rewatch is not None:
+            payload["diaryDetails"] = {"diaryDate": None, "rewatch": rewatch}
+        if review_text is not None:
+            payload["review"] = {"text": review_text}
+            if review_spoilers is not None:
+                payload["review"]["containsSpoilers"] = review_spoilers
+        if tags is not None:
+            payload["tags"] = tags
+        if rating is not None:
+            payload["rating"] = rating
+        if liked is not None:
+            payload["like"] = liked
+        if comment_policy is not None:
+            payload["commentPolicy"] = comment_policy
+        if privacy_policy is not None:
+            payload["privacyPolicy"] = privacy_policy
+        payload.update(extra)
         return self.transport.request("POST", "/log-entries", api=True, json=payload, expected_status=(200, 201)).json()
 
-    def update(self, log_entry: str, **payload: Any) -> dict[str, Any]:
+    def update(
+        self,
+        log_entry: str,
+        *,
+        watched_on: str | None | object = _UNSET,
+        remove_diary: bool = False,
+        rating: float | None | object = _UNSET,
+        review_text: str | None | object = _UNSET,
+        remove_review: bool = False,
+        review_spoilers: bool | None | object = _UNSET,
+        tags: list[str] | None | object = _UNSET,
+        liked: bool | None | object = _UNSET,
+        comment_policy: str | None | object = _UNSET,
+        privacy_policy: str | None | object = _UNSET,
+        rewatch: bool | None | object = _UNSET,
+        **extra: Any,
+    ) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._log_url(log_entry)
+        lid = self._log_lid(log_entry)
+        payload: dict[str, Any] = {}
+        if remove_diary:
+            payload["diaryDetails"] = None
+        elif watched_on is not _UNSET or rewatch is not _UNSET:
+            diary_details: dict[str, Any] = {}
+            if watched_on is not _UNSET:
+                diary_details["diaryDate"] = watched_on
+            if rewatch is not _UNSET:
+                diary_details["rewatch"] = rewatch
+            payload["diaryDetails"] = diary_details
+        if remove_review:
+            payload["review"] = None
+        elif review_text is not _UNSET or review_spoilers is not _UNSET:
+            review_payload: dict[str, Any] = {}
+            if review_text is not _UNSET:
+                review_payload["text"] = review_text
+            if review_spoilers is not _UNSET:
+                review_payload["containsSpoilers"] = review_spoilers
+            payload["review"] = review_payload
+        payload.update(
+            _drop_unset(
+                {
+                    "tags": tags,
+                    "rating": rating,
+                    "like": liked,
+                    "commentPolicy": comment_policy,
+                    "privacyPolicy": privacy_policy,
+                }
+            )
+        )
+        payload.update(extra)
         return self.transport.request("PATCH", f"/log-entry/{lid}", api=True, json=payload, expected_status=(200,)).json()
 
     def delete(self, log_entry: str) -> None:
         self._require_api()
-        _, lid = self._log_url(log_entry)
+        lid = self._log_lid(log_entry)
         self.transport.request("DELETE", f"/log-entry/{lid}", api=True, expected_status=(204,))
 
     def comment(self, log_entry: str, text: str) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._log_url(log_entry)
+        lid = self._log_lid(log_entry)
         return self.transport.request(
             "POST",
             f"/log-entry/{lid}/comments",
             api=True,
-            json={"message": text},
+            json={"comment": text},
             expected_status=(200, 201),
         ).json()
 
     def like(self, log_entry: str, enabled: bool = True) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._log_url(log_entry)
+        lid = self._log_lid(log_entry)
         return self.transport.request(
             "PATCH",
             f"/log-entry/{lid}/me",
@@ -368,6 +475,11 @@ class ListsNamespace(_BaseNamespace):
         if list_id.startswith("/"):
             return self.transport.resolve_url(list_id)
         return self.transport.resolve_url(f"/{list_id.strip('/')}/")
+
+    def _list_lid(self, list_id: str) -> str:
+        if list_id.startswith("http") or list_id.startswith("/"):
+            return self._require_lid(list_id)
+        return self._require_lid(f"/{list_id.strip('/')}/")
 
     def list(self, member: str | None = None, filters: dict[str, Any] | None = None, cursor: str | None = None) -> Page[ListResource]:
         if member:
@@ -399,45 +511,104 @@ class ListsNamespace(_BaseNamespace):
     def stats(self, list_id: str) -> dict[str, Any]:
         return self.get(list_id).stats
 
-    def create(self, **payload: Any) -> dict[str, Any]:
+    def create(
+        self,
+        *,
+        name: str,
+        published: bool = True,
+        ranked: bool = False,
+        description: str | None = None,
+        comment_policy: str | None = None,
+        share_policy: str | None = None,
+        cloned_from: str | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
         self._require_api()
+        payload: dict[str, Any] = {"name": name, "published": published, "ranked": ranked}
+        if description is not None:
+            payload["description"] = description
+        if comment_policy is not None:
+            payload["commentPolicy"] = comment_policy
+        if share_policy is not None:
+            payload["sharePolicy"] = share_policy
+        if cloned_from is not None:
+            payload["clonedFrom"] = self._list_lid(cloned_from)
+        payload.update(extra)
         return self.transport.request("POST", "/lists", api=True, json=payload, expected_status=(200, 201)).json()
 
-    def update(self, list_id: str, **payload: Any) -> dict[str, Any]:
+    def update(
+        self,
+        list_id: str,
+        *,
+        version: int | None | object = _UNSET,
+        published: bool | None | object = _UNSET,
+        name: str | None | object = _UNSET,
+        comment_policy: str | None | object = _UNSET,
+        share_policy: str | None | object = _UNSET,
+        ranked: bool | None | object = _UNSET,
+        description: str | None | object = _UNSET,
+        tags: list[str] | None | object = _UNSET,
+        films_to_remove: list[str] | None | object = _UNSET,
+        **extra: Any,
+    ) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._list_url(list_id)
+        lid = self._list_lid(list_id)
+        payload = _drop_unset(
+            {
+                "version": version,
+                "published": published,
+                "name": name,
+                "commentPolicy": comment_policy,
+                "sharePolicy": share_policy,
+                "ranked": ranked,
+                "description": description,
+                "tags": tags,
+                "filmsToRemove": [self._client.films._film_lid(film) for film in films_to_remove] if films_to_remove is not _UNSET and films_to_remove is not None else films_to_remove,
+            }
+        )
+        payload.update(extra)
         return self.transport.request("PATCH", f"/list/{lid}", api=True, json=payload, expected_status=(200,)).json()
 
     def delete(self, list_id: str) -> None:
         self._require_api()
-        _, lid = self._list_url(list_id)
+        lid = self._list_lid(list_id)
         self.transport.request("DELETE", f"/list/{lid}", api=True, expected_status=(204,))
 
-    def upsert_entries(self, list_id: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    def upsert_entries(self, list_id: str, entries: list[dict[str, Any] | str]) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._list_url(list_id)
+        lid = self._list_lid(list_id)
+        payload_entries: list[dict[str, Any]] = []
+        for entry in entries:
+            if isinstance(entry, str):
+                payload_entries.append({"film": self._client.films._film_lid(entry), "action": "ADD"})
+                continue
+            entry_payload = dict(entry)
+            film_value = entry_payload.get("film")
+            if film_value:
+                entry_payload["film"] = self._client.films._film_lid(str(film_value))
+            payload_entries.append(entry_payload)
         return self.transport.request(
             "PATCH",
-            "/lists",
+            f"/list/{lid}",
             api=True,
-            json={"target": lid, "entries": entries},
+            json={"entries": payload_entries},
             expected_status=(200,),
         ).json()
 
     def comment(self, list_id: str, text: str) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._list_url(list_id)
+        lid = self._list_lid(list_id)
         return self.transport.request(
             "POST",
             f"/list/{lid}/comments",
             api=True,
-            json={"message": text},
+            json={"comment": text},
             expected_status=(200, 201),
         ).json()
 
     def like(self, list_id: str, enabled: bool = True) -> dict[str, Any]:
         self._require_api()
-        _, lid = self._list_url(list_id)
+        lid = self._list_lid(list_id)
         return self.transport.request(
             "PATCH",
             f"/list/{lid}/me",
