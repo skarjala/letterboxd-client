@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urljoin
 
@@ -10,6 +11,15 @@ import httpx
 
 from .errors import AuthenticationError, NotFound, PermissionDenied, RateLimited, UnsupportedFlow
 from .parsers import extract_form
+
+
+def _retry_after_seconds(value: str | None) -> float:
+    if not value:
+        return 1.0
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        return 1.0
 
 
 class LetterboxdTransport:
@@ -43,9 +53,17 @@ class LetterboxdTransport:
     def set_api_token(self, token: str) -> None:
         self.client.headers["Authorization"] = f"Bearer {token}"
 
-    def set_cookies(self, cookies: dict[str, str]) -> None:
+    def set_cookies(self, cookies: Mapping[str, str]) -> None:
+        self.client.cookies.clear()
         for key, value in cookies.items():
             self.client.cookies.set(key, value)
+
+    def get_cookies(self) -> dict[str, str]:
+        return dict(self.client.cookies.items())
+
+    def clear_session(self) -> None:
+        self.client.cookies.clear()
+        self.client.headers.pop("Authorization", None)
 
     def request(
         self,
@@ -58,16 +76,15 @@ class LetterboxdTransport:
     ) -> httpx.Response:
         base = self.api_base if api else self.base_url
         url = path if path.startswith("http") else urljoin(base + "/", path.lstrip("/"))
-        last_response: httpx.Response | None = None
         for attempt in range(self.retries + 1):
-            response = self.client.request(method, url, **kwargs)
-            last_response = response
-            if response.status_code == 429:
-                retry_after = float(response.headers.get("Retry-After", "1"))
+            try:
+                response = self.client.request(method, url, **kwargs)
+            except httpx.RequestError as exc:
                 if attempt < self.retries:
-                    time.sleep(retry_after)
+                    time.sleep(0.25 * (attempt + 1))
                     continue
-                raise RateLimited(f"Rate limited by {url}")
+                raise UnsupportedFlow(f"Request to {url} failed: {exc}") from exc
+
             if response.status_code in expected_status:
                 return response
             if response.status_code == 401:
@@ -76,13 +93,17 @@ class LetterboxdTransport:
                 raise PermissionDenied(f"Permission denied for {url}")
             if response.status_code == 404:
                 raise NotFound(f"Not found: {url}")
-            if 500 <= response.status_code < 600 and attempt < self.retries:
-                time.sleep(0.25 * (attempt + 1))
-                continue
-            response.raise_for_status()
-        if last_response is None:
-            raise RuntimeError("Request loop terminated without a response")
-        return last_response
+            if response.status_code == 429:
+                if attempt < self.retries:
+                    time.sleep(_retry_after_seconds(response.headers.get("Retry-After")))
+                    continue
+                raise RateLimited(f"Rate limited by {url}")
+            if 500 <= response.status_code < 600:
+                if attempt < self.retries:
+                    time.sleep(0.25 * (attempt + 1))
+                    continue
+                raise UnsupportedFlow(f"Upstream service error ({response.status_code}) for {url}")
+            raise UnsupportedFlow(f"Unexpected response ({response.status_code}) for {url}")
 
     def get_html(self, path: str, **kwargs: Any) -> str:
         return self.request("GET", path, expected_status=(200,), **kwargs).text
@@ -116,4 +137,3 @@ class LetterboxdTransport:
         )
         if "Sign in to Letterboxd" in response.text and response.status_code == 200:
             raise AuthenticationError("Letterboxd rejected the supplied credentials")
-
