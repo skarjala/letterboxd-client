@@ -2,6 +2,22 @@
 
 High-level Python SDK for Letterboxd ingestion, export parsing, and LLM/data-analysis workflows.
 
+## Start Here
+
+Use the bundled examples first. They are small, runnable, and map directly to common analysis workflows.
+
+```bash
+conda run -p /Users/sandeepkarjala/pythonenv python examples/search_and_fetch.py "parasite"
+conda run -p /Users/sandeepkarjala/pythonenv python examples/load_export.py /path/to/letterboxd-export.zip --dataset diary_entries
+conda run -p /Users/sandeepkarjala/pythonenv python examples/dataset_preview.py /path/to/letterboxd-export.zip --dataset diary_entries
+```
+
+For most LLM/data-analysis projects, the flow is:
+
+1. Load a Letterboxd export archive.
+2. Normalize the rows into stable Python dicts.
+3. Emit JSONL or a dataframe for downstream tooling.
+
 ## What this project does
 
 - Wraps Letterboxd with a high-level `LetterboxdClient`
@@ -43,7 +59,9 @@ if first:
     print(film.title, film.year)
 ```
 
-## Analysis examples
+## Analysis Examples
+
+### Convert an export to JSONL
 
 ```python
 from letterboxd_client import LetterboxdClient
@@ -54,6 +72,8 @@ diary = export.get("diary", [])
 jsonl = client.exports.to_jsonl(diary)
 print(jsonl.splitlines()[0])
 ```
+
+### Turn rows into a dataframe
 
 ```python
 from letterboxd_client import LetterboxdClient
@@ -83,8 +103,29 @@ except ImportError:
 
 ## Examples
 
-- [examples/load_export.py](examples/load_export.py)
 - [examples/search_and_fetch.py](examples/search_and_fetch.py)
+- [examples/load_export.py](examples/load_export.py)
+- [examples/dataset_preview.py](examples/dataset_preview.py)
+
+## Example Workflows
+
+### Search and fetch a film
+
+```bash
+conda run -p /Users/sandeepkarjala/pythonenv python examples/search_and_fetch.py "parasite"
+```
+
+### Normalize an export and emit JSONL
+
+```bash
+conda run -p /Users/sandeepkarjala/pythonenv python examples/load_export.py /path/to/letterboxd-export.zip --dataset diary_entries
+```
+
+### Inspect a dataset as a dataframe
+
+```bash
+conda run -p /Users/sandeepkarjala/pythonenv python examples/dataset_preview.py /path/to/letterboxd-export.zip --dataset diary_entries
+```
 
 ## Testing
 
@@ -92,3 +133,8 @@ except ImportError:
 conda run -p /Users/sandeepkarjala/pythonenv python -m unittest discover -s tests -v
 ```
 
+## Release Notes
+
+- Release history lives in [CHANGELOG.md](CHANGELOG.md)
+- Contributor guidance lives in [CONTRIBUTING.md](CONTRIBUTING.md)
+- Tagged releases build wheels and source distributions in GitHub Actions
