@@ -1,4 +1,3 @@
-import csv
 import tempfile
 import unittest
 import zipfile
@@ -11,16 +10,14 @@ class ExportTests(unittest.TestCase):
     def test_parse_letterboxd_csv_normalizes_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "diary.csv"
-            with path.open("w", encoding="utf-8", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=["Name", "Rating", "Rewatch"])
-                writer.writeheader()
-                writer.writerow({"Name": "High and Low", "Rating": "4.5", "Rewatch": "Yes"})
+            path.write_text("\ufeffName,Rating,,Rewatch\nHigh and Low,4.5,,Yes\n\n", encoding="utf-8")
 
             rows = parse_letterboxd_csv(path)
 
         self.assertEqual(rows[0]["name"], "High and Low")
         self.assertEqual(rows[0]["rating"], 4.5)
         self.assertEqual(rows[0]["rewatch"], True)
+        self.assertEqual(len(rows), 1)
 
     def test_parse_imdb_export_handles_bom(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -34,13 +31,13 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "export.zip"
             with zipfile.ZipFile(archive, "w") as zf:
-                zf.writestr("ratings.csv", "Name,Rating\nAlien,5\n")
+                zf.writestr("Diary Entries.csv", "Name,Rating\nAlien,5\n")
                 zf.writestr("notes.txt", "ignore me")
 
             payload = load_account_export_zip(archive)
 
-        self.assertIn("ratings", payload)
-        self.assertEqual(payload["ratings"][0]["rating"], 5)
+        self.assertIn("diary_entries", payload)
+        self.assertEqual(payload["diary_entries"][0]["rating"], 5)
 
     def test_normalize_accepts_record_sequence(self) -> None:
         rows = normalize([{"Film Name": "Cure", "Liked": "true"}])
@@ -49,4 +46,3 @@ class ExportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
