@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Generic, TypeVar
 
@@ -138,9 +139,8 @@ def to_plain_data(value: Any) -> Any:
     """Recursively convert package models to JSON-serialisable data."""
     if is_dataclass(value):
         return {key: to_plain_data(val) for key, val in asdict(value).items()}
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {key: to_plain_data(val) for key, val in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [to_plain_data(item) for item in value]
     return value
-
