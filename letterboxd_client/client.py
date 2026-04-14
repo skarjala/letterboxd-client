@@ -22,6 +22,7 @@ from .models import (
 )
 from .parsers import (
     collect_links,
+    extract_next_cursor_from_html,
     guess_kind,
     parse_activity_page,
     parse_comments,
@@ -47,6 +48,58 @@ def _ensure_page_url(path_or_url: str, base_url: str) -> str:
 
 def _drop_unset(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not _UNSET}
+
+
+def _film_from_result(result: SearchResult) -> Film:
+    return Film(
+        id=result.id,
+        title=result.title,
+        url=result.url,
+        year=result.year,
+        summary=result.summary,
+        raw=result.raw,
+    )
+
+
+def _member_from_result(result: SearchResult) -> Member:
+    username = result.id or urlparse(result.url).path.strip("/").split("/", 1)[0]
+    return Member(
+        id=result.id or username,
+        username=username,
+        url=result.url,
+        display_name=result.title,
+        raw=result.raw,
+    )
+
+
+def _list_from_result(result: SearchResult) -> ListResource:
+    return ListResource(
+        id=result.id,
+        title=result.title,
+        url=result.url,
+        raw=result.raw,
+    )
+
+
+def _log_from_result(result: SearchResult) -> LogEntry:
+    attrs = result.raw.get("attrs", {})
+    film_name = attrs.get("data-film-name")
+    film_year = None
+    if attrs.get("data-film-release-year"):
+        try:
+            film_year = int(attrs["data-film-release-year"])
+        except ValueError:
+            film_year = None
+    film = None
+    if film_name or result.kind == "film":
+        film = Film(
+            id=attrs.get("data-film-id") or (result.id if result.kind == "film" else None),
+            title=film_name or result.title,
+            url=attrs.get("data-film-link") or result.url,
+            year=film_year or result.year,
+            raw=result.raw,
+        )
+    return LogEntry(id=result.id, film=film, url=result.url, raw=result.raw)
 
 
 class _BaseNamespace:
@@ -113,7 +166,30 @@ class SearchNamespace(_BaseNamespace):
 
     def resolve(self, url_or_boxd_it: str) -> SearchResult:
         resolved_url, lid = self.transport.resolve_url(url_or_boxd_it)
-        return SearchResult(kind=guess_kind(resolved_url), title=resolved_url.rstrip("/").split("/")[-1], url=resolved_url, id=lid)
+        kind = guess_kind(resolved_url)
+        title = resolved_url.rstrip("/").split("/")[-1]
+        year = None
+        summary = None
+        if kind == "film":
+            film = self._client.films.get(resolved_url)
+            title = film.title
+            year = film.year
+            summary = film.summary
+        elif kind == "member":
+            member = self._client.members.get(resolved_url)
+            title = member.display_name or member.username
+            summary = member.bio
+        elif kind == "list":
+            list_resource = self._client.lists.get(resolved_url)
+            title = list_resource.title
+            summary = list_resource.description
+        elif kind == "log":
+            log_entry = self._client.logs.get(resolved_url)
+            if log_entry.film is not None:
+                title = log_entry.film.title
+            if log_entry.review is not None:
+                summary = log_entry.review.text
+        return SearchResult(kind=kind, title=title, url=resolved_url, id=lid, year=year, summary=summary)
 
 
 class FilmsNamespace(_BaseNamespace):
@@ -133,12 +209,12 @@ class FilmsNamespace(_BaseNamespace):
         if cursor:
             params["cursor"] = cursor
         html = self.transport.get_html("/films/", params=params or None)
-        items = [
-            Film(id=result.id, title=result.title, url=result.url, raw=result.raw)
-            for result in parse_search_results(self._client.base_url, html)
-            if result.kind == "film"
-        ]
-        return Page(items=items, source_url=_ensure_page_url("/films/", self._client.base_url))
+        items = [_film_from_result(result) for result in parse_search_results(self._client.base_url, html) if result.kind == "film"]
+        return Page(
+            items=items,
+            next_cursor=extract_next_cursor_from_html(html),
+            source_url=_ensure_page_url("/films/", self._client.base_url),
+        )
 
     def stats(self, film: str) -> dict[str, Any]:
         return self.get(film).stats
@@ -251,34 +327,34 @@ class MembersNamespace(_BaseNamespace):
         resolved_url, _ = self._member_url(member)
         path = urlparse(resolved_url).path.rstrip("/") + "/watchlist/"
         html = self.transport.get_html(path, params=(filters or None))
-        items = [
-            Film(id=result.id, title=result.title, url=result.url, raw=result.raw)
-            for result in parse_search_results(self._client.base_url, html)
-            if result.kind == "film"
-        ]
-        return Page(items=items, source_url=_ensure_page_url(path, self._client.base_url))
+        items = [_film_from_result(result) for result in parse_search_results(self._client.base_url, html) if result.kind == "film"]
+        return Page(
+            items=items,
+            next_cursor=extract_next_cursor_from_html(html),
+            source_url=_ensure_page_url(path, self._client.base_url),
+        )
 
     def followers(self, member: str) -> Page[Member]:
         resolved_url, _ = self._member_url(member)
         path = urlparse(resolved_url).path.rstrip("/") + "/followers/"
         html = self.transport.get_html(path)
-        items = [
-            Member(id=result.id, username=urlparse(result.url).path.strip("/"), url=result.url, display_name=result.title, raw=result.raw)
-            for result in parse_search_results(self._client.base_url, html)
-            if result.kind == "member"
-        ]
-        return Page(items=items, source_url=_ensure_page_url(path, self._client.base_url))
+        items = [_member_from_result(result) for result in parse_search_results(self._client.base_url, html) if result.kind == "member"]
+        return Page(
+            items=items,
+            next_cursor=extract_next_cursor_from_html(html),
+            source_url=_ensure_page_url(path, self._client.base_url),
+        )
 
     def following(self, member: str) -> Page[Member]:
         resolved_url, _ = self._member_url(member)
         path = urlparse(resolved_url).path.rstrip("/") + "/following/"
         html = self.transport.get_html(path)
-        items = [
-            Member(id=result.id, username=urlparse(result.url).path.strip("/"), url=result.url, display_name=result.title, raw=result.raw)
-            for result in parse_search_results(self._client.base_url, html)
-            if result.kind == "member"
-        ]
-        return Page(items=items, source_url=_ensure_page_url(path, self._client.base_url))
+        items = [_member_from_result(result) for result in parse_search_results(self._client.base_url, html) if result.kind == "member"]
+        return Page(
+            items=items,
+            next_cursor=extract_next_cursor_from_html(html),
+            source_url=_ensure_page_url(path, self._client.base_url),
+        )
 
     def follow(self, member: str, enabled: bool = True) -> dict[str, Any]:
         self._require_api()
@@ -332,10 +408,15 @@ class LogsNamespace(_BaseNamespace):
         html = self.transport.get_html(path, params=(filters or None))
         items: list[LogEntry] = []
         for result in parse_search_results(self._client.base_url, html):
-            if result.kind == "film":
-                film_obj = Film(id=result.id, title=result.title, url=result.url, raw=result.raw)
-                items.append(LogEntry(id=None, film=film_obj, url=result.url, raw={"source": path}))
-        return Page(items=items, source_url=_ensure_page_url(path, self._client.base_url))
+            if result.kind == "log":
+                items.append(_log_from_result(result))
+            elif result.kind == "film":
+                items.append(_log_from_result(result))
+        return Page(
+            items=items,
+            next_cursor=extract_next_cursor_from_html(html),
+            source_url=_ensure_page_url(path, self._client.base_url),
+        )
 
     def get(self, log_entry: str) -> LogEntry:
         resolved_url, lid = self._log_url(log_entry)
@@ -488,12 +569,12 @@ class ListsNamespace(_BaseNamespace):
         else:
             path = "/lists/"
         html = self.transport.get_html(path, params={**(filters or {}), **({"cursor": cursor} if cursor else {})})
-        items = [
-            ListResource(id=result.id, title=result.title, url=result.url, raw=result.raw)
-            for result in parse_search_results(self._client.base_url, html)
-            if result.kind == "list"
-        ]
-        return Page(items=items, source_url=_ensure_page_url(path, self._client.base_url))
+        items = [_list_from_result(result) for result in parse_search_results(self._client.base_url, html) if result.kind == "list"]
+        return Page(
+            items=items,
+            next_cursor=extract_next_cursor_from_html(html),
+            source_url=_ensure_page_url(path, self._client.base_url),
+        )
 
     def get(self, list_id: str) -> ListResource:
         resolved_url, lid = self._list_url(list_id)
