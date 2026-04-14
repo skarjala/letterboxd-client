@@ -69,17 +69,49 @@ class _FormCollector(HTMLParser):
         super().__init__()
         self.action: str | None = None
         self.inputs: dict[str, str] = {}
-        self._seen_form = False
+        self.forms: list[dict[str, Any]] = []
+        self._current_form: dict[str, Any] | None = None
+        self._textarea_name: str | None = None
+        self._textarea_value: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attr_map = {key: value or "" for key, value in attrs}
-        if tag == "form" and not self._seen_form:
-            self._seen_form = True
-            self.action = attr_map.get("action")
-        elif tag == "input" and self._seen_form:
+        if tag == "form":
+            self._current_form = {
+                "action": attr_map.get("action"),
+                "attrs": attr_map,
+                "inputs": {},
+            }
+            if self.action is None:
+                self.action = attr_map.get("action")
+                self.inputs = self._current_form["inputs"]
+        elif tag == "input" and self._current_form is not None:
             name = attr_map.get("name")
             if name:
-                self.inputs[name] = attr_map.get("value", "")
+                input_type = attr_map.get("type", "").lower()
+                if input_type in {"checkbox", "radio"} and "checked" not in attr_map:
+                    return
+                self._current_form["inputs"][name] = attr_map.get("value", "")
+        elif tag == "textarea" and self._current_form is not None:
+            self._textarea_name = attr_map.get("name")
+            self._textarea_value = []
+        elif tag == "button" and self._current_form is not None:
+            name = attr_map.get("name")
+            if name and name not in self._current_form["inputs"]:
+                self._current_form["inputs"][name] = attr_map.get("value", "")
+
+    def handle_data(self, data: str) -> None:
+        if self._textarea_name is not None:
+            self._textarea_value.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "textarea" and self._current_form is not None and self._textarea_name:
+            self._current_form["inputs"][self._textarea_name] = "".join(self._textarea_value).strip()
+            self._textarea_name = None
+            self._textarea_value = []
+        elif tag == "form" and self._current_form is not None:
+            self.forms.append(self._current_form)
+            self._current_form = None
 
 
 def extract_json_ld(html: str) -> list[dict[str, Any]]:
@@ -119,6 +151,12 @@ def extract_form(html: str) -> tuple[str | None, dict[str, str]]:
     parser = _FormCollector()
     parser.feed(html)
     return parser.action, parser.inputs
+
+
+def extract_forms(html: str) -> list[dict[str, Any]]:
+    parser = _FormCollector()
+    parser.feed(html)
+    return parser.forms
 
 
 def strip_html(html: str) -> str:

@@ -20,6 +20,32 @@ SIGN_IN_FORM = """
 </html>
 """
 
+PAGE_FORMS = """
+<html>
+  <body>
+    <form action="/film/cure/watchlist/" method="post">
+      <input type="hidden" name="csrf" value="token-123">
+      <input type="hidden" name="inWatchlist" value="false">
+    </form>
+    <form action="/film/cure/comments/" method="post">
+      <input type="hidden" name="csrf" value="token-123">
+      <textarea name="comment"></textarea>
+    </form>
+  </body>
+</html>
+"""
+
+PAGE_FORMS_WITH_RELATIVE_ACTION = """
+<html>
+  <body>
+    <form action="comments/" method="post">
+      <input type="hidden" name="csrf" value="token-123">
+      <textarea name="comment"></textarea>
+    </form>
+  </body>
+</html>
+"""
+
 
 class TransportTests(unittest.TestCase):
     def make_transport(self, handler, retries: int = 1) -> LetterboxdTransport:
@@ -158,6 +184,62 @@ class TransportTests(unittest.TestCase):
 
         with self.assertRaises(AuthenticationError):
             transport.login("sandeep", "wrong-password")
+
+    def test_submit_form_preserves_hidden_inputs_and_referer(self) -> None:
+        seen_bodies: list[dict[str, list[str]]] = []
+        seen_referers: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and request.url.path == "/film/cure/":
+                return httpx.Response(200, text=PAGE_FORMS, request=request)
+            if request.method == "POST" and request.url.path == "/film/cure/comments/":
+                seen_bodies.append(parse_qs(request.content.decode()))
+                seen_referers.append(request.headers.get("referer"))
+                return httpx.Response(200, text="ok", request=request)
+            raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+        transport = self.make_transport(handler, retries=1)
+
+        response = transport.submit_form(
+            "/film/cure/",
+            action_contains="comments",
+            updates={"comment": "Great review"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            seen_bodies,
+            [{"csrf": ["token-123"], "comment": ["Great review"]}],
+        )
+        self.assertEqual(seen_referers, ["https://letterboxd.com/film/cure/"])
+
+    def test_submit_form_resolves_relative_actions_from_page_url(self) -> None:
+        seen_bodies: list[dict[str, list[str]]] = []
+        seen_referers: list[str | None] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET" and request.url.path == "/film/cure/":
+                return httpx.Response(200, text=PAGE_FORMS_WITH_RELATIVE_ACTION, request=request)
+            if request.method == "POST" and request.url.path == "/film/cure/comments/":
+                seen_bodies.append(parse_qs(request.content.decode()))
+                seen_referers.append(request.headers.get("referer"))
+                return httpx.Response(200, text="ok", request=request)
+            raise AssertionError(f"Unexpected request: {request.method} {request.url}")
+
+        transport = self.make_transport(handler, retries=1)
+
+        response = transport.submit_form(
+            "/film/cure/",
+            action_contains="comments",
+            updates={"comment": "Relative action"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            seen_bodies,
+            [{"csrf": ["token-123"], "comment": ["Relative action"]}],
+        )
+        self.assertEqual(seen_referers, ["https://letterboxd.com/film/cure/"])
 
 
 if __name__ == "__main__":
