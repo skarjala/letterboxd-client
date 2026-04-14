@@ -26,6 +26,12 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 
+[project.urls]
+Homepage = "https://github.com/skarjala/letterboxd-client"
+Source = "https://github.com/skarjala/letterboxd-client"
+Issues = "https://github.com/skarjala/letterboxd-client/issues"
+Changelog = "https://github.com/skarjala/letterboxd-client/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 dataframes = [
   "pandas>=2",
@@ -35,4 +41,3 @@ dataframes = [
 
 [tool.setuptools]
 packages = ["letterboxd_client"]
-
