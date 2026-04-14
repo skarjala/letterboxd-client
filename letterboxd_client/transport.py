@@ -157,14 +157,16 @@ class LetterboxdTransport:
         html = self.get_html(page_url)
         forms = extract_forms(html)
         selected_form = None
+        selected_action = None
         for form in forms:
-            action = form.get("action") or page_url
+            action = urljoin(page_url, form.get("action") or "")
             inputs = form.get("inputs", {})
             if action_contains and action_contains not in action:
                 continue
             if required_fields and not all(field in inputs for field in required_fields):
                 continue
             selected_form = form
+            selected_action = action
             break
         if selected_form is None:
             raise UnsupportedFlow(f"Could not locate a matching form on {page_url}")
@@ -176,7 +178,7 @@ class LetterboxdTransport:
 
         return self.request(
             "POST",
-            selected_form.get("action") or page_url,
+            selected_action or page_url,
             data=payload,
             headers={"Referer": page_url},
             expected_status=expected_status,

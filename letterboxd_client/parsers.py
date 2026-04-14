@@ -6,6 +6,7 @@ import json
 import re
 from html import unescape
 from html.parser import HTMLParser
+from urllib.parse import parse_qs
 from typing import Any
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
@@ -32,6 +33,10 @@ _COMMENT_BLOCK_RE = re.compile(
 _COMMENT_BODY_RE = re.compile(
     r"<(?:div|p)[^>]+class=[\"'][^\"']*comment-body[^\"']*[\"'][^>]*>(.*?)</(?:div|p)>",
     re.IGNORECASE | re.DOTALL,
+)
+_NEXT_LINK_RE = re.compile(
+    r"<a[^>]+(?:rel=[\"']next[\"']|class=[\"'][^\"']*next[^\"']*[\"'])[^>]+href=[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
 )
 
 
@@ -176,6 +181,35 @@ def extract_year(value: str | None) -> int | None:
     return int(match.group(0))
 
 
+def extract_next_cursor(url_or_path: str | None) -> str | None:
+    if not url_or_path:
+        return None
+    query = parse_qs(urlparse(url_or_path).query)
+    values = query.get("cursor")
+    if not values:
+        return None
+    return values[0]
+
+
+def extract_next_cursor_from_html(html: str) -> str | None:
+    match = _NEXT_LINK_RE.search(html)
+    if not match:
+        return None
+    return extract_next_cursor(match.group(1))
+
+
+def infer_id_from_url(url: str, kind: str | None = None) -> str | None:
+    path = [segment for segment in urlparse(url).path.split("/") if segment]
+    if not path:
+        return None
+    resolved_kind = kind or guess_kind(url)
+    if resolved_kind == "member":
+        return path[0]
+    if resolved_kind in {"film", "list", "log", "story"}:
+        return path[-1]
+    return path[-1]
+
+
 def collect_anchor_records(base_url: str, html: str) -> list[dict[str, Any]]:
     parser = _LinkCollector()
     parser.feed(html)
@@ -191,6 +225,12 @@ def collect_anchor_records(base_url: str, html: str) -> list[dict[str, Any]]:
 
 def collect_links(base_url: str, html: str) -> list[tuple[str, str]]:
     return [(record["href"], record["text"]) for record in collect_anchor_records(base_url, html) if record["text"]]
+
+
+def is_next_link(attrs: dict[str, Any]) -> bool:
+    rel = attrs.get("rel", "").lower()
+    css_class = attrs.get("class", "").lower()
+    return rel == "next" or "next" in css_class.split()
 
 
 def guess_kind(url: str) -> str:
@@ -218,6 +258,8 @@ def parse_search_results(base_url: str, html: str) -> list[SearchResult]:
     for record in collect_anchor_records(base_url, html):
         url = record["href"]
         attrs = record["attrs"]
+        if is_next_link(attrs):
+            continue
         kind = attrs.get("data-item-type", "").lower() or guess_kind(url)
         title = record["title"] or record["text"]
         if kind == "unknown" or url in seen or not title:
@@ -228,6 +270,7 @@ def parse_search_results(base_url: str, html: str) -> list[SearchResult]:
                 kind=kind,
                 title=title,
                 url=url,
+                id=attrs.get("data-item-id") or infer_id_from_url(url, kind),
                 year=extract_year(attrs.get("data-film-release-year") or title),
                 raw={"attrs": attrs, "text": record["text"]},
             )
@@ -244,7 +287,7 @@ def parse_film(url: str, html: str, lid: str | None = None) -> Film:
     released = payload.get("datePublished") or title
     year = extract_year(released)
     return Film(
-        id=lid,
+        id=lid or infer_id_from_url(url, "film"),
         title=title,
         url=url,
         year=year,
@@ -259,7 +302,7 @@ def parse_member(url: str, html: str, lid: str | None = None) -> Member:
     username = urlparse(url).path.strip("/").split("/", 1)[0] or "unknown"
     display_name = trim_letterboxd_suffix(meta.get("og:title")) or trim_letterboxd_suffix(extract_title(html)) or username
     return Member(
-        id=lid,
+        id=lid or infer_id_from_url(url, "member"),
         username=username,
         url=url,
         display_name=display_name,
@@ -287,7 +330,7 @@ def parse_list(url: str, html: str, lid: str | None = None) -> ListResource:
             )
         )
     return ListResource(
-        id=lid,
+        id=lid or infer_id_from_url(url, "list"),
         title=title,
         url=url,
         description=meta.get("description"),
@@ -302,9 +345,9 @@ def parse_activity_page(url: str, html: str) -> Page[Activity]:
     items = [
         Activity(kind=guess_kind(record["href"]), actor=actor, target=record["title"], url=record["href"], summary=record["text"] or record["title"], raw={"attrs": record["attrs"]})
         for record in collect_anchor_records(url, html)
-        if guess_kind(record["href"]) in {"film", "list", "member", "log"}
+        if not is_next_link(record["attrs"]) and guess_kind(record["href"]) in {"film", "list", "member", "log"}
     ]
-    return Page(items=items, source_url=url)
+    return Page(items=items, next_cursor=extract_next_cursor_from_html(html), source_url=url)
 
 
 def parse_comments(url: str, html: str) -> list[Comment]:
@@ -345,7 +388,7 @@ def parse_log_entry(url: str, html: str, lid: str | None = None) -> LogEntry:
             break
     description = extract_meta(html).get("description")
     return LogEntry(
-        id=lid,
+        id=lid or infer_id_from_url(url, "log"),
         film=film,
         url=url,
         review=Review(text=description),
@@ -362,6 +405,16 @@ def parse_feed(xml_text: str) -> Page[Activity]:
         raise MarkupChanged("RSS feed parsing failed") from exc
 
     items: list[Activity] = []
+    next_cursor = None
+    for node in root.iter():
+        if node.tag.rsplit("}", 1)[-1] != "link":
+            continue
+        rel = node.attrib.get("rel")
+        href = node.attrib.get("href") or (node.text or "").strip()
+        if rel == "next":
+            next_cursor = extract_next_cursor(href)
+            if next_cursor:
+                break
     feed_items = root.findall(".//item")
     if not feed_items:
         feed_items = [node for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "entry"]
@@ -389,4 +442,4 @@ def parse_feed(xml_text: str) -> Page[Activity]:
                 raw={},
             )
         )
-    return Page(items=items)
+    return Page(items=items, next_cursor=next_cursor)
