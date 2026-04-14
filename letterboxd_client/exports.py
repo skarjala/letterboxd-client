@@ -10,16 +10,36 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .models import to_plain_data
-from .normalize import normalize_mapping, normalize_records
+from .normalize import normalize_mapping, normalize_records, snake_case
+
+
+def _clean_csv_row(row: dict[str | None, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key, value in row.items():
+        if key is None:
+            continue
+        stripped = str(key).strip()
+        if not stripped:
+            continue
+        cleaned[stripped] = value
+    return cleaned
 
 
 def _read_csv_text(text: str) -> list[dict[str, Any]]:
-    reader = csv.DictReader(io.StringIO(text))
-    return [normalize_mapping(dict(row)) for row in reader]
+    reader = csv.DictReader(io.StringIO(text), skipinitialspace=True)
+    rows: list[dict[str, Any]] = []
+    for row in reader:
+        cleaned = _clean_csv_row(dict(row))
+        if not cleaned:
+            continue
+        if not any(value not in (None, "") for value in cleaned.values()):
+            continue
+        rows.append(normalize_mapping(cleaned))
+    return rows
 
 
 def parse_letterboxd_csv(path: str | Path) -> list[dict[str, Any]]:
-    return _read_csv_text(Path(path).read_text(encoding="utf-8"))
+    return _read_csv_text(Path(path).read_text(encoding="utf-8-sig"))
 
 
 def parse_imdb_export(path: str | Path) -> list[dict[str, Any]]:
@@ -38,7 +58,10 @@ def load_account_export_zip(path: str | Path) -> dict[str, list[dict[str, Any]]]
                 continue
             with archive.open(name) as handle:
                 text = handle.read().decode("utf-8-sig")
-            results[Path(name).stem] = _read_csv_text(text)
+            dataset_name = snake_case(Path(name).stem)
+            if not dataset_name:
+                continue
+            results[dataset_name] = _read_csv_text(text)
     return results
 
 
@@ -48,4 +71,3 @@ def to_jsonl(data: Iterable[Any], path: str | Path | None = None) -> str:
     if path is not None:
         Path(path).write_text(payload + ("\n" if payload else ""), encoding="utf-8")
     return payload
-
