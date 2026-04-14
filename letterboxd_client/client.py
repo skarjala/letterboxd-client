@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlparse
 
+import httpx
+
 from . import bulk as bulk_mod
 from . import exports as exports_mod
 from .errors import UnsupportedFlow
@@ -49,6 +51,19 @@ def _drop_unset(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not _UNSET}
 
 
+def _response_to_mapping(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {
+            "status_code": response.status_code,
+            "url": str(response.url),
+        }
+    if isinstance(payload, dict):
+        return payload
+    return {"data": payload, "status_code": response.status_code, "url": str(response.url)}
+
+
 class _BaseNamespace:
     def __init__(self, client: "LetterboxdClient") -> None:
         self._client = client
@@ -57,11 +72,44 @@ class _BaseNamespace:
     def transport(self) -> LetterboxdTransport:
         return self._client.transport
 
+    def _has_api_token(self) -> bool:
+        if hasattr(self.transport, "has_api_token"):
+            return bool(self.transport.has_api_token())
+        return "Authorization" in getattr(self.transport.client, "headers", {})
+
     def _require_api(self) -> None:
-        if "Authorization" not in self.transport.client.headers:
+        if not self._has_api_token():
             raise UnsupportedFlow(
                 "This mutation currently requires an API bearer token configured on the client."
             )
+
+    def _has_session(self) -> bool:
+        if hasattr(self.transport, "has_session"):
+            return bool(self.transport.has_session())
+        cookies = getattr(self.transport.client, "cookies", None)
+        if hasattr(cookies, "items"):
+            return bool(dict(cookies.items()))
+        return bool(cookies)
+
+    def _submit_session_form(
+        self,
+        page_path: str,
+        *,
+        action_contains: str,
+        updates: dict[str, Any] | None = None,
+        required_fields: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        if not self._has_session():
+            raise UnsupportedFlow(
+                "This mutation requires a logged-in Letterboxd session or an API bearer token."
+            )
+        response = self.transport.submit_form(
+            page_path,
+            action_contains=action_contains,
+            required_fields=required_fields,
+            updates=updates,
+        )
+        return _response_to_mapping(response)
 
     def _resolve_reference(self, value: str, *, default_prefix: str = "") -> tuple[str, str | None]:
         if default_prefix and not value.startswith("http") and not value.startswith("/"):
@@ -81,8 +129,7 @@ class AuthNamespace(_BaseNamespace):
         return self._client
 
     def logout(self) -> None:
-        self.transport.client.cookies.clear()
-        self.transport.client.headers.pop("Authorization", None)
+        self.transport.clear_session()
 
     def from_cookies(self, cookies: dict[str, str]) -> "LetterboxdClient":
         self.transport.set_cookies(cookies)
@@ -162,6 +209,13 @@ class FilmsNamespace(_BaseNamespace):
         return scraped.relationship or FilmRelationship(raw=scraped.raw)
 
     def watchlist(self, film: str, enabled: bool = True) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._film_url(film)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="watchlist",
+                updates={"inWatchlist": str(enabled).lower()},
+            )
         self._require_api()
         lid = self._film_lid(film)
         return self.transport.request(
@@ -173,6 +227,13 @@ class FilmsNamespace(_BaseNamespace):
         ).json()
 
     def rate(self, film: str, rating: float) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._film_url(film)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="rate",
+                updates={"rating": rating},
+            )
         self._require_api()
         lid = self._film_lid(film)
         return self.transport.request(
@@ -184,6 +245,13 @@ class FilmsNamespace(_BaseNamespace):
         ).json()
 
     def like(self, film: str, enabled: bool = True) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._film_url(film)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="like",
+                updates={"liked": str(enabled).lower()},
+            )
         self._require_api()
         lid = self._film_lid(film)
         return self.transport.request(
@@ -195,6 +263,13 @@ class FilmsNamespace(_BaseNamespace):
         ).json()
 
     def mark_watched(self, film: str, watched: bool = True) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._film_url(film)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="watched",
+                updates={"watched": str(watched).lower()},
+            )
         self._require_api()
         lid = self._film_lid(film)
         return self.transport.request(
@@ -281,6 +356,13 @@ class MembersNamespace(_BaseNamespace):
         return Page(items=items, source_url=_ensure_page_url(path, self._client.base_url))
 
     def follow(self, member: str, enabled: bool = True) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._member_url(member)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="follow",
+                updates={"following": str(enabled).lower()},
+            )
         self._require_api()
         lid = self._member_lid(member)
         return self.transport.request(
@@ -292,6 +374,13 @@ class MembersNamespace(_BaseNamespace):
         ).json()
 
     def block(self, member: str, enabled: bool = True) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._member_url(member)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="block",
+                updates={"blocking": str(enabled).lower()},
+            )
         self._require_api()
         lid = self._member_lid(member)
         return self.transport.request(
@@ -441,11 +530,22 @@ class LogsNamespace(_BaseNamespace):
         return self.transport.request("PATCH", f"/log-entry/{lid}", api=True, json=payload, expected_status=(200,)).json()
 
     def delete(self, log_entry: str) -> None:
+        if not self._has_api_token():
+            resolved_url, _ = self._log_url(log_entry)
+            self._submit_session_form(resolved_url, action_contains="delete")
+            return
         self._require_api()
         lid = self._log_lid(log_entry)
         self.transport.request("DELETE", f"/log-entry/{lid}", api=True, expected_status=(204,))
 
     def comment(self, log_entry: str, text: str) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._log_url(log_entry)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="comment",
+                updates={"comment": text},
+            )
         self._require_api()
         lid = self._log_lid(log_entry)
         return self.transport.request(
@@ -457,6 +557,13 @@ class LogsNamespace(_BaseNamespace):
         ).json()
 
     def like(self, log_entry: str, enabled: bool = True) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._log_url(log_entry)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="like",
+                updates={"liked": str(enabled).lower()},
+            )
         self._require_api()
         lid = self._log_lid(log_entry)
         return self.transport.request(
@@ -570,6 +677,10 @@ class ListsNamespace(_BaseNamespace):
         return self.transport.request("PATCH", f"/list/{lid}", api=True, json=payload, expected_status=(200,)).json()
 
     def delete(self, list_id: str) -> None:
+        if not self._has_api_token():
+            resolved_url, _ = self._list_url(list_id)
+            self._submit_session_form(resolved_url, action_contains="delete")
+            return
         self._require_api()
         lid = self._list_lid(list_id)
         self.transport.request("DELETE", f"/list/{lid}", api=True, expected_status=(204,))
@@ -596,6 +707,13 @@ class ListsNamespace(_BaseNamespace):
         ).json()
 
     def comment(self, list_id: str, text: str) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._list_url(list_id)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="comment",
+                updates={"comment": text},
+            )
         self._require_api()
         lid = self._list_lid(list_id)
         return self.transport.request(
@@ -607,6 +725,13 @@ class ListsNamespace(_BaseNamespace):
         ).json()
 
     def like(self, list_id: str, enabled: bool = True) -> dict[str, Any]:
+        if not self._has_api_token():
+            resolved_url, _ = self._list_url(list_id)
+            return self._submit_session_form(
+                resolved_url,
+                action_contains="like",
+                updates={"liked": str(enabled).lower()},
+            )
         self._require_api()
         lid = self._list_lid(list_id)
         return self.transport.request(

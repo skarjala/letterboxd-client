@@ -10,7 +10,7 @@ from urllib.parse import urljoin
 import httpx
 
 from .errors import AuthenticationError, NotFound, PermissionDenied, RateLimited, UnsupportedFlow
-from .parsers import extract_form
+from .parsers import extract_form, extract_forms
 
 
 def _retry_after_seconds(value: str | None) -> float:
@@ -64,6 +64,12 @@ class LetterboxdTransport:
     def clear_session(self) -> None:
         self.client.cookies.clear()
         self.client.headers.pop("Authorization", None)
+
+    def has_api_token(self) -> bool:
+        return "Authorization" in self.client.headers
+
+    def has_session(self) -> bool:
+        return bool(self.get_cookies())
 
     def request(
         self,
@@ -137,3 +143,41 @@ class LetterboxdTransport:
         )
         if "Sign in to Letterboxd" in response.text and response.status_code == 200:
             raise AuthenticationError("Letterboxd rejected the supplied credentials")
+
+    def submit_form(
+        self,
+        page_path: str,
+        *,
+        action_contains: str | None = None,
+        required_fields: tuple[str, ...] = (),
+        updates: Mapping[str, Any] | None = None,
+        expected_status: tuple[int, ...] = (200, 302, 303),
+    ) -> httpx.Response:
+        page_url = page_path if page_path.startswith("http") else urljoin(self.base_url + "/", page_path.lstrip("/"))
+        html = self.get_html(page_url)
+        forms = extract_forms(html)
+        selected_form = None
+        for form in forms:
+            action = form.get("action") or page_url
+            inputs = form.get("inputs", {})
+            if action_contains and action_contains not in action:
+                continue
+            if required_fields and not all(field in inputs for field in required_fields):
+                continue
+            selected_form = form
+            break
+        if selected_form is None:
+            raise UnsupportedFlow(f"Could not locate a matching form on {page_url}")
+
+        payload = dict(selected_form.get("inputs", {}))
+        if updates:
+            for key, value in updates.items():
+                payload[key] = str(value)
+
+        return self.request(
+            "POST",
+            selected_form.get("action") or page_url,
+            data=payload,
+            headers={"Referer": page_url},
+            expected_status=expected_status,
+        )
