@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 import re
 from typing import Any
 
@@ -35,10 +36,19 @@ def coerce_scalar(value: Any) -> Any:
         return stripped
 
 
-def normalize_mapping(row: dict[str, Any]) -> dict[str, Any]:
-    return {snake_case(key): coerce_scalar(value) for key, value in row.items()}
+def normalize_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return normalize_mapping(value)
+    if isinstance(value, list):
+        return [normalize_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [normalize_value(item) for item in value]
+    return coerce_scalar(value)
 
 
-def normalize_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def normalize_mapping(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {snake_case(key): normalize_value(value) for key, value in row.items()}
+
+
+def normalize_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [normalize_mapping(record) for record in records]
-
